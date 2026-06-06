@@ -11,7 +11,7 @@ KERNEL_VERSION=v5.15.163
 BUSYBOX_VERSION=1_33_1
 FINDER_APP_DIR=$(realpath $(dirname $0))
 ARCH=arm64
-CROSS_COMPILE=aarch64-none-linux-gnu-
+CROSS_COMPILE=aarch64-linux-gnu-
 
 if [ $# -lt 1 ]
 then
@@ -21,6 +21,7 @@ else
 	echo "Using passed directory ${OUTDIR} for output"
 fi
 
+OUTDIR=$(realpath "${OUTDIR}")
 mkdir -p ${OUTDIR}
 
 cd "$OUTDIR"
@@ -35,9 +36,14 @@ if [ ! -e ${OUTDIR}/linux-stable/arch/${ARCH}/boot/Image ]; then
     git checkout ${KERNEL_VERSION}
 
     # TODO: Add your kernel build steps here
+    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} mrproper
+    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} defconfig
+    make -j$(nproc) ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} all
+    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} dtbs
 fi
 
 echo "Adding the Image in outdir"
+cp ${OUTDIR}/linux-stable/arch/${ARCH}/boot/Image ${OUTDIR}/
 
 echo "Creating the staging directory for the root filesystem"
 cd "$OUTDIR"
@@ -48,33 +54,79 @@ then
 fi
 
 # TODO: Create necessary base directories
+mkdir -p "${OUTDIR}/rootfs"
+cd "${OUTDIR}/rootfs"
+mkdir -p bin dev etc home lib lib64 proc sbin sys tmp usr var
+mkdir -p usr/bin usr/lib usr/sbin
+mkdir -p var/log
 
 cd "$OUTDIR"
 if [ ! -d "${OUTDIR}/busybox" ]
 then
-git clone git://busybox.net/busybox.git
+    git clone git://busybox.net/busybox.git
     cd busybox
     git checkout ${BUSYBOX_VERSION}
     # TODO:  Configure busybox
+    make distclean
+    make defconfig
 else
     cd busybox
 fi
 
+make distclean
+make defconfig
+sed -i 's/CONFIG_TC=y/CONFIG_TC=n/' .config
+sed -i 's/CONFIG_FEATURE_TC_INGRESS=y/CONFIG_FEATURE_TC_INGRESS=n/' .config
+sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+
 # TODO: Make and install busybox
+make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} CONFIG_PREFIX="${OUTDIR}/rootfs" install
 
 echo "Library dependencies"
-${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter"
-${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library"
+cd "${OUTDIR}/rootfs"
+${CROSS_COMPILE}readelf -a bin/busybox | grep "program interpreter" || true
+${CROSS_COMPILE}readelf -a bin/busybox | grep "Shared library" || true
 
 # TODO: Add library dependencies to rootfs
+mkdir -p lib lib64
+SYSROOT=$(${CROSS_COMPILE}gcc -print-sysroot)
+if [ -z "${SYSROOT}" ] || [ "${SYSROOT}" = "/" ]; then
+    SYSROOT="/usr/aarch64-linux-gnu"
+fi
+
+cp -a ${SYSROOT}/lib/ld-linux-aarch64.so.* lib/
+cp -a ${SYSROOT}/lib/libm.so.* lib64/
+cp -a ${SYSROOT}/lib/libresolv.so.* lib64/
+cp -a ${SYSROOT}/lib/libc.so.* lib64/
 
 # TODO: Make device nodes
+mkdir -p dev
+sudo mknod -m 666 dev/null c 1 3
+sudo mknod -m 600 dev/console c 5 1
 
 # TODO: Clean and build the writer utility
-
+cd ${FINDER_APP_DIR}
+make clean
+make CROSS_COMPILE=${CROSS_COMPILE} CFLAGS="-O2 -g -static" LDFLAGS="-static"
 # TODO: Copy the finder related scripts and executables to the /home directory
 # on the target rootfs
+mkdir -p "${OUTDIR}/rootfs/home"
+cp writer "${OUTDIR}/rootfs/home/"
+cp finder.sh "${OUTDIR}/rootfs/home/"
+cp finder-test.sh "${OUTDIR}/rootfs/home/"
+cp autorun-qemu.sh "${OUTDIR}/rootfs/home/"
+
+mkdir -p "${OUTDIR}/rootfs/home/conf"
+cp ${FINDER_APP_DIR}/../conf/username.txt "${OUTDIR}/rootfs/home/conf/"
+cp ${FINDER_APP_DIR}/../conf/assignment.txt "${OUTDIR}/rootfs/home/conf/"
+
+sed -i 's/\.\.\/conf/conf/g' "${OUTDIR}/rootfs/home/finder-test.sh"
 
 # TODO: Chown the root directory
+cd "${OUTDIR}/rootfs"
+sudo chown -R root:root *
 
 # TODO: Create initramfs.cpio.gz
+find . | cpio -H newc -ov --owner root:root | gzip -9 > "${OUTDIR}/initramfs.cpio.gz"
+
+echo "BUILD SUCCESSFUL!"

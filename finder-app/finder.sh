@@ -1,3 +1,4 @@
+#!/bin/sh
 if [ $# -lt 2 ]
 then
 	    echo "Error: Missing arguments"
